@@ -19,13 +19,15 @@ namespace Follower;
 internal sealed class FollowerPickUpManager
 {
     private const int HoverDelayMs = 85;
+    private const int PostClickPickupSettleMs = 650;
     private const int MissingTargetRetryMs = 125;
     private const int MissingTargetGraceMs = 900;
     private const int MinMovementActionGapMs = 95;
     private const int MaxLabelsToInspect = 220;
     private const int PlayerAllocationOwnerTokenOffset = 0x1D0;
     private const int FixedScanIntervalMs = 250;
-    private const int FixedPauseBetweenPickupClicksMs = 140;
+    private const int FixedPauseBetweenPickupClicksMs = 650;
+    private const int FixedMinimumFreeInventorySlots = 0;
     private const int FixedFailedItemBlacklistMs = 12000;
 
     private readonly Follower _plugin;
@@ -73,10 +75,16 @@ internal sealed class FollowerPickUpManager
     {
         try
         {
-            return Math.Clamp(
-                _plugin.Settings?.PickUp?.PauseBetweenClicksMs?.Value ?? FixedPauseBetweenPickupClicksMs,
+            var delayMs = Math.Clamp(
+                _plugin.Settings?.PickUp?.PickupClickDelayMs?.Value ?? FixedPauseBetweenPickupClicksMs,
                 90,
                 750);
+
+            var allowFastDelay = _plugin.Settings?.PickUp?.AllowPickupClickDelayBelowSafeMinimum?.Value ?? false;
+            if (!allowFastDelay)
+                delayMs = Math.Max(PostClickPickupSettleMs, delayMs);
+
+            return delayMs;
         }
         catch
         {
@@ -388,9 +396,6 @@ internal sealed class FollowerPickUpManager
         if (!IsPickUpEverythingEnabled() && _compiledRules.Count == 0)
             return false;
 
-        if (IsInventoryReserveReached())
-            return false;
-
         if (!CanStartPickupNearLeader())
             return false;
 
@@ -477,7 +482,7 @@ internal sealed class FollowerPickUpManager
 
     private bool TickMissingTarget(DateTime now)
     {
-        if (_lastPickupClickAt != DateTime.MinValue && (now - _lastPickupClickAt).TotalMilliseconds >= GetPickupClickDelayMs())
+        if (_lastPickupClickAt != DateTime.MinValue && (now - _lastPickupClickAt).TotalMilliseconds >= 250)
         {
             CompletePickup("item disappeared after click");
             return false;
@@ -1269,7 +1274,7 @@ internal sealed class FollowerPickUpManager
     {
         try
         {
-            var reserveCells = Math.Max(0, _plugin.Settings.PickUp.MinimumFreeInventorySlots.Value);
+            var reserveCells = Math.Max(0, FixedMinimumFreeInventorySlots);
             if (reserveCells <= 0)
                 return false;
 
@@ -1313,11 +1318,41 @@ internal sealed class FollowerPickUpManager
 
             var itemHeight = Math.Clamp(item.Height, 1, Math.Max(1, inventory.Rows));
             var itemWidth = Math.Clamp(item.Width, 1, Math.Max(1, inventory.Columns));
+            if (WouldViolateInventoryReserve(inventory, itemHeight, itemWidth))
+                return false;
+
             return FindSpotInventory(itemHeight, itemWidth, inventory) != null;
         }
         catch
         {
             return true;
+        }
+    }
+
+    private bool WouldViolateInventoryReserve(ServerInventory inventory, int itemHeight, int itemWidth)
+    {
+        try
+        {
+            var reserveCells = Math.Max(0, FixedMinimumFreeInventorySlots);
+            if (reserveCells <= 0)
+                return false;
+
+            var occupied = GetContainer2DArray(inventory);
+            if (occupied == null)
+                return false;
+
+            var free = 0;
+            for (var y = 0; y < inventory.Rows; y++)
+            for (var x = 0; x < inventory.Columns; x++)
+                if (!occupied[y, x])
+                    free++;
+
+            var neededCells = Math.Max(1, itemHeight * itemWidth);
+            return free - neededCells <= reserveCells;
+        }
+        catch
+        {
+            return false;
         }
     }
 

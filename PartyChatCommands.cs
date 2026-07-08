@@ -203,8 +203,19 @@ namespace Follower
                 return;
             }
 
+            if (TryParseLeaderSimpleCommand(
+                    text,
+                    leaderName,
+                    s.PartyChatLeaderCommands.ContinuePortalCommand.Value,
+                    "-c",
+                    out var continueCommandText))
+            {
+                _plugin.ForcePortalEntryFromPartyChat(leaderName, continueCommandText);
+                return;
+            }
+
             // When the leader paused the whole plugin with -pp, keep only this chat-command scanner alive.
-            // Ignore -d/-l/-ls/-p/-s until -ss arrives, so no old command is queued and executed after resume.
+            // Ignore -d/-l/-ls/-p/-s until -ss or the force-portal command arrives.
             if (_plugin.IsWholePluginPausedByPartyChat)
                 return;
 
@@ -368,8 +379,18 @@ namespace Follower
             string command,
             out string commandText)
         {
+            return TryParseLeaderSimpleCommand(rawText, leaderName, command, "-d", out commandText);
+        }
+
+        private static bool TryParseLeaderSimpleCommand(
+            string rawText,
+            string leaderName,
+            string command,
+            string defaultCommand,
+            out string commandText)
+        {
             commandText = string.Empty;
-            command = string.IsNullOrWhiteSpace(command) ? "-d" : command.Trim();
+            command = string.IsNullOrWhiteSpace(command) ? defaultCommand : command.Trim();
 
             if (!TryExtractPartyLeaderMessage(rawText, leaderName, out var message))
                 return false;

@@ -117,6 +117,9 @@ public class PartyChatLeaderCommandSettings
     [Menu("Resume whole plugin + ESC command")]
     public TextNode ResumePluginCommand { get; set; } = new TextNode("-ss");
 
+    [Menu("Find/click map portal command")]
+    public TextNode ContinuePortalCommand { get; set; } = new TextNode("-c");
+
     [Menu("Dump inventory to trade command")]
     public TextNode DumpInventoryCommand { get; set; } = new TextNode("-d");
 
@@ -243,8 +246,11 @@ public class PickUpSettings
     [IgnoreMenu]
     public RangeNode<int> ScanIntervalMs { get; set; } = new RangeNode<int>(250, 100, 2000);
 
-    [Menu("Pickup click delay (ms)", "Delay after clicking a ground item before the next pickup action. Lower = faster pickup, higher = safer on lag/desync.")]
-    public RangeNode<int> PauseBetweenClicksMs { get; set; } = new RangeNode<int>(140, 90, 750);
+    [Menu("Allow pickup click delay below 650 ms", "Advanced: allows faster but less safe pickup delays below the stable 650 ms default.")]
+    public ToggleNode AllowPickupClickDelayBelowSafeMinimum { get; set; } = new ToggleNode(false);
+
+    [Menu("Pickup click delay (ms)", "Delay after clicking a ground item before the next pickup action. Default 650 ms is safer on lag/desync.")]
+    public RangeNode<int> PickupClickDelayMs { get; set; } = new RangeNode<int>(650, 90, 750);
 
     [Menu("Max attempts per item")]
     public RangeNode<int> MaxAttemptsPerItem { get; set; } = new RangeNode<int>(3, 1, 6);
@@ -255,8 +261,8 @@ public class PickUpSettings
     [Menu("Max active pickup time (ms)")]
     public RangeNode<int> MaxActivePickupMs { get; set; } = new RangeNode<int>(6500, 1000, 30000);
 
-    [Menu("Stop pickup when free inventory slots <=")]
-    public RangeNode<int> MinimumFreeInventorySlots { get; set; } = new RangeNode<int>(2, 0, 20);
+    [IgnoreMenu]
+    public RangeNode<int> MinimumFreeInventorySlots { get; set; } = new RangeNode<int>(0, 0, 20);
 
     [Menu("No pickup while enemy close")]
     public ToggleNode NoPickupWhileEnemyClose { get; set; } = new ToggleNode(false);

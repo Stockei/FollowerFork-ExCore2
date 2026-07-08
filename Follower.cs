@@ -51,8 +51,13 @@ private Random random = new Random();
     private const string AbyssSubAreaTransitionMetadataPath = "Metadata/MiscellaneousObjects/Abyss/AbyssSubAreaTransition";
     private const int PortalHoverDelayMs = 80;
     private const int PortalLabelScanMaxVisibleLabels = 96;
+    private const int LeaderPortalEntryRequestTtlMs = 12000;
+    private const int LeaderPortalEntryRequestScanMs = 250;
     private DateTime _portalHoverClickAt = DateTime.MinValue;
     private uint _portalHoverEntityId;
+    private bool _leaderPortalEntryRequested;
+    private DateTime _leaderPortalEntryRequestExpiresAt = DateTime.MinValue;
+    private DateTime _nextLeaderPortalEntryRequestScanAt = DateTime.MinValue;
 
     // Boss arena entrances in maps are exposed as ground labels, not always as normal
     // AreaTransition entities. The UI hover from the user shows:
@@ -288,6 +293,7 @@ private Random random = new Random();
         _lastCursorMoveTarget = Vector2.Zero;
         ResetPendingPortalClick();
         ResetPendingArenaTransitionClick();
+        CancelLeaderPortalEntryRequest();
         ResetTaskWatchdog();
         SetRuntimeStatus("AreaChange", "pathing reset", "");
         _arenaTransitionRetrySuppressedUntil = DateTime.MinValue;
@@ -583,9 +589,15 @@ private Random random = new Random();
         _lastTargetPosition = Vector3.Zero;
         _lastPlayerPosition = Vector3.Zero;
         _nextBotAction = DateTime.Now.AddMilliseconds(150);
+        if (!enabled)
+            CancelLeaderPortalEntryRequest();
+
         ReleaseAllPluginInputsNow(force: true, reason: enabled
             ? "Follower.PartyChatCommands.Start.Release"
             : "Follower.PartyChatCommands.Stop.Release");
+
+        if (enabled)
+            RequestLeaderPortalEntryIfUseful("PartyChatStart", clearExistingTasks: true);
 
         try
         {
@@ -634,6 +646,8 @@ private Random random = new Random();
         _lastTargetPosition = Vector3.Zero;
         _lastPlayerPosition = Vector3.Zero;
         _nextBotAction = DateTime.Now.AddMilliseconds(150);
+        if (paused)
+            CancelLeaderPortalEntryRequest();
 
         ReleaseAllPluginInputsNow(force: true, reason: paused
             ? "Follower.PartyChatCommands.PluginPause.ReleaseBeforeEsc"
@@ -648,11 +662,174 @@ private Random random = new Random();
         ReleaseMovementKeyNow(force: true);
         ReleaseDodgeSprintKeyNow(force: true);
 
+        if (!paused)
+            RequestLeaderPortalEntryIfUseful("PartyChatPluginResume", clearExistingTasks: true);
+
         try
         {
             LogMessage($"PartyChatCommands: leader {leaderName} sent {commandText}; whole plugin {(paused ? "paused" : "resumed")} + ESC", 3);
         }
         catch { }
+    }
+
+    internal void ForcePortalEntryFromPartyChat(string leaderName, string commandText)
+    {
+        using var __profileScope = ProfileScope("Follower.PartyChatCommands.ForcePortalEntry");
+
+        _wholePluginPausedByPartyChatCommand = false;
+        _pausedByPartyChatCommand = false;
+
+        if (!Settings.General.IsFollowEnabled.Value)
+            Settings.General.IsFollowEnabled.SetValueNoEvent(true);
+
+        _followTarget = null;
+        _lastPlayerPosition = Vector3.Zero;
+        _nextBotAction = DateTime.Now.AddMilliseconds(80);
+        _pickUpManager?.Reset("PartyChatContinuePortalCommand");
+        ReleaseAllPluginInputsNow(force: true, reason: "Follower.PartyChatCommands.ContinuePortal.Release");
+
+        var queued = RequestLeaderPortalEntryIfUseful("PartyChatContinuePortal", clearExistingTasks: true);
+
+        try
+        {
+            LogMessage($"PartyChatCommands: leader {leaderName} sent {commandText}; portal entry {(queued ? "queued" : "requested")}", 3);
+        }
+        catch { }
+    }
+
+    private bool RequestLeaderPortalEntryIfUseful(string source, bool clearExistingTasks)
+    {
+        using var __profileScope = ProfileScope("Follower.Portal.RequestLeaderPortalEntry");
+
+        if (!IsInHideout() && !IsInAtziriEntranceArea())
+        {
+            CancelLeaderPortalEntryRequest();
+            return false;
+        }
+
+        if (TryQueueBestKnownPortalTransitionTask(source, clearExistingTasks))
+        {
+            CancelLeaderPortalEntryRequest();
+            return true;
+        }
+
+        var now = DateTime.Now;
+        _leaderPortalEntryRequested = true;
+        _leaderPortalEntryRequestExpiresAt = now.AddMilliseconds(LeaderPortalEntryRequestTtlMs);
+        _nextLeaderPortalEntryRequestScanAt = DateTime.MinValue;
+        SetRuntimeStatus("Portal", "waiting for visible portal", source);
+        return false;
+    }
+
+    private bool TryProcessPendingLeaderPortalEntryRequest()
+    {
+        if (!_leaderPortalEntryRequested)
+            return false;
+
+        var now = DateTime.Now;
+        if (now > _leaderPortalEntryRequestExpiresAt)
+        {
+            CancelLeaderPortalEntryRequest();
+            SetRuntimeStatus("Portal", "portal request expired", "no visible portal found");
+            return false;
+        }
+
+        if (now < _nextLeaderPortalEntryRequestScanAt)
+            return false;
+
+        _nextLeaderPortalEntryRequestScanAt = now.AddMilliseconds(LeaderPortalEntryRequestScanMs);
+
+        if (!IsInHideout() && !IsInAtziriEntranceArea())
+        {
+            CancelLeaderPortalEntryRequest();
+            return false;
+        }
+
+        if (!TryQueueBestKnownPortalTransitionTask("PendingLeaderPortalEntry", clearExistingTasks: true))
+            return false;
+
+        CancelLeaderPortalEntryRequest();
+        return true;
+    }
+
+    private void CancelLeaderPortalEntryRequest()
+    {
+        _leaderPortalEntryRequested = false;
+        _leaderPortalEntryRequestExpiresAt = DateTime.MinValue;
+        _nextLeaderPortalEntryRequestScanAt = DateTime.MinValue;
+    }
+
+    private bool TryQueueBestKnownPortalTransitionTask(string source, bool clearExistingTasks)
+    {
+        using var __profileScope = ProfileScope("Follower.Portal.TryQueueBestKnownPortalTransitionTask");
+
+        PortalTarget portalTarget = null;
+        if (IsInHideout())
+            portalTarget = ResolveBestHideoutPortalTarget();
+        else if (IsInAtziriEntranceArea())
+            portalTarget = ToPortalTarget(FindNearestMapCheckerPortal(requireTargetable: false));
+
+        if (portalTarget != null)
+            return QueuePortalTransitionTask(portalTarget.WorldPosition, source, clearExistingTasks);
+
+        var fallback = FindBestKnownPortalTransitionEntity();
+        return fallback != null && QueuePortalTransitionTask(fallback.Pos, source, clearExistingTasks);
+    }
+
+    private Entity FindBestKnownPortalTransitionEntity()
+    {
+        using var __profileScope = ProfileScope("Follower.Portal.FindBestKnownPortalTransitionEntity");
+
+        var playerPos = GameController.Player?.Pos ?? Vector3.Zero;
+        var anchor = _lastTargetPosition != Vector3.Zero ? _lastTargetPosition : playerPos;
+
+        return _areaTransitions.Values
+            .Where(IsRelevantLeaderPortalTransitionEntity)
+            .OrderBy(entity => Vector3.Distance(anchor, entity.Pos))
+            .FirstOrDefault();
+    }
+
+    private bool IsRelevantLeaderPortalTransitionEntity(Entity entity)
+    {
+        if (entity == null)
+            return false;
+
+        if (IsInHideout())
+        {
+            return IsMapCheckerPortalEntity(entity) ||
+                   entity.Type == ExileCore2.Shared.Enums.EntityType.Portal ||
+                   entity.Type == ExileCore2.Shared.Enums.EntityType.TownPortal;
+        }
+
+        if (!IsInAtziriEntranceArea())
+            return false;
+
+        return IsMapCheckerPortalEntity(entity) ||
+               (!string.IsNullOrEmpty(entity.RenderName) &&
+                entity.RenderName.Contains("Atziri's Temple", StringComparison.OrdinalIgnoreCase));
+    }
+
+    private bool QueuePortalTransitionTask(Vector3 worldPosition, string source, bool clearExistingTasks)
+    {
+        if (worldPosition == Vector3.Zero)
+            worldPosition = GameController.Player?.Pos ?? Vector3.Zero;
+
+        if (worldPosition == Vector3.Zero)
+            return false;
+
+        if (clearExistingTasks)
+            _tasks.Clear();
+
+        _tasks.Add(new TaskNode(
+            worldPosition,
+            Settings.General.PathfindingNodeDistance.Value,
+            TaskNode.TaskNodeType.Transition));
+
+        ResetPendingPortalClick();
+        ResetTaskWatchdog();
+        _nextBotAction = DateTime.Now.AddMilliseconds(80);
+        SetRuntimeStatus("Portal", "transition task queued", source);
+        return true;
     }
 
     private void TapEscapeForPartyCommand(string reason)
@@ -746,6 +923,7 @@ if (Settings.General.PanicPauseHotkey.PressedOnce())
     ResetTaskWatchdog();
     ResetPendingPortalClick();
     ResetPendingArenaTransitionClick();
+    CancelLeaderPortalEntryRequest();
     _pickUpManager?.Reset("PanicPauseHotkey");
     ReleaseAllPluginInputsNow(force: true, reason: "Follower.PanicPauseHotkey.Release");
     SetRuntimeStatus("Panic", "Whole plugin paused and all plugin inputs released", "");
@@ -847,8 +1025,9 @@ finally { _spikeProfiler?.End("Option.PickUp", __pickUpProfileStart); }
         // same map. Scan/click the ground-label transition before normal follow planning
         // so following movement cannot override the Arena click.
         var arenaTransitionQueued = TryQueueArenaTransitionTask();
+        var leaderCommandPortalQueued = !arenaTransitionQueued && TryProcessPendingLeaderPortalEntryRequest();
 
-        if (!arenaTransitionQueued && _followTarget != null)
+        if (!arenaTransitionQueued && !leaderCommandPortalQueued && _followTarget != null)
         {
             var distanceFromFollower = Vector3.Distance(GameController.Player.Pos, _followTarget.Pos);
             //We are NOT within clear path distance range of leader. Logic can continue

@@ -15,6 +15,8 @@ namespace Follower
         private readonly Follower _plugin;
         private readonly AutoPartyScanDebugLogger _scanDebug;
         private DateTime _lastAttempt = DateTime.UtcNow.AddSeconds(-5);
+        private DateTime _blockFollowUntilUtc = DateTime.MinValue;
+        private const int InviteFollowBlockPaddingMs = 350;
 
 
         private static readonly int[][] LegacyPartyToastAcceptPaths =
@@ -47,6 +49,8 @@ namespace Follower
 
         public string Status { get; private set; } = "Idle";
 
+        public bool IsFollowBlockedByInvite => DateTime.UtcNow < _blockFollowUntilUtc;
+
         public void TickDebugHotkey()
         {
             using var __profileScope = _plugin.ProfileScope("AutoParty.TickDebugHotkey");
@@ -62,21 +66,36 @@ namespace Follower
             using var __profileScope = _plugin.ProfileScope("AutoParty.Tick.Total");
             var s = _plugin.Settings;
             Status = "Idle";
-            if (!s.Enable || (!s.TpTrade.AutoAcceptParty.Value && !s.TpTrade.AutoAcceptTrade.Value))
+            if (!s.Enable)
                 return false;
 
-            if ((DateTime.UtcNow - _lastAttempt).TotalMilliseconds < s.TpTrade.AutoPartyPollMs.Value) return false;
-            _lastAttempt = DateTime.UtcNow;
+            var now = DateTime.UtcNow;
+            var pollMs = Math.Max(200, s.TpTrade.AutoPartyPollMs.Value);
+            if ((now - _lastAttempt).TotalMilliseconds < pollMs)
+            {
+                if (IsFollowBlockedByInvite)
+                {
+                    Status = "invite/trade popup visible; follow blocked";
+                    return true;
+                }
+
+                return false;
+            }
+
+            _lastAttempt = now;
 
             try
             {
-                if (s.TpTrade.AutoAcceptParty.Value || s.TpTrade.AutoAcceptTrade.Value)
-                {
-                    var accepted = TryAcceptInvites(s.TpTrade.AutoAcceptParty.Value, s.TpTrade.AutoAcceptTrade.Value);
-                    Status = accepted ? "accepted invite/trade popup" : "scanned, no matching popup";
-                    return accepted;
-                }
-
+                var acceptParty = s.TpTrade.AutoAcceptParty.Value;
+                var acceptTrade = s.TpTrade.AutoAcceptTrade.Value;
+                var accepted = TryAcceptInvites(acceptParty, acceptTrade);
+                var blocked = IsFollowBlockedByInvite;
+                Status = accepted
+                    ? "accepted invite/trade popup"
+                    : blocked
+                        ? "invite/trade popup visible; follow blocked"
+                        : "scanned, no matching popup";
+                return accepted || blocked;
             }
             catch (Exception ex)
             {
@@ -84,7 +103,7 @@ namespace Follower
                 _plugin.LogMessage($"AutoParty error: {ex.Message}", 5);
             }
 
-            return false;
+            return IsFollowBlockedByInvite;
         }
 
         private static System.Collections.Generic.IReadOnlyList<string> GetAllowedInviters(FollowerSettings s)
@@ -113,8 +132,6 @@ namespace Follower
         private bool TryAcceptInvites(bool acceptParty, bool acceptTrade)
         {
             using var __profileScope = _plugin.ProfileScope("AutoParty.TryAcceptInvites");
-            if (!acceptParty && !acceptTrade) return false;
-
             bool ok = false;
             _scanDebug.BeginTick(acceptParty, acceptTrade);
             try
@@ -132,6 +149,24 @@ namespace Follower
             finally
             {
                 _scanDebug.EndTick(ok);
+            }
+        }
+
+        private void MarkFollowBlockedForInvite(string source)
+        {
+            try
+            {
+                var now = DateTime.UtcNow;
+                var blockMs = Math.Max(700, (_plugin.Settings?.TpTrade?.AutoPartyPollMs?.Value ?? 500) + InviteFollowBlockPaddingMs);
+                var until = now.AddMilliseconds(blockMs);
+                if (until > _blockFollowUntilUtc)
+                    _blockFollowUntilUtc = until;
+
+                _scanDebug.Event(source, "follow blocked until " + _blockFollowUntilUtc.ToString("O"));
+            }
+            catch
+            {
+                _blockFollowUntilUtc = DateTime.UtcNow.AddMilliseconds(850);
             }
         }
 
@@ -354,6 +389,7 @@ namespace Follower
                 return false;
             }
 
+            MarkFollowBlockedForInvite(source);
             return ClickNode(node, "IngameUi->" + FormatPath(path), source);
         }
 
@@ -368,7 +404,11 @@ namespace Follower
 
             ScanToast(root, rootPath, 0, state, allowed, maxDepth: 6, maxNodes: 40);
 
+            bool inviteVisible = state.PartyInviteFound || state.TradeRequestFound;
             bool wantedInvite = (acceptParty && state.PartyInviteFound) || (acceptTrade && state.TradeRequestFound);
+
+            if (inviteVisible)
+                MarkFollowBlockedForInvite("DirectToast");
 
             // Current ExileCore2 toast exposes account/realm names inconsistently (for example
             // TheFryX#3718 while settings contain TheFry_BMs). Preserve the original working
@@ -382,7 +422,8 @@ namespace Follower
                     " trade=" + state.TradeRequestFound +
                     " accept=" + (state.AcceptNode != null) +
                     " allowedSeen=" + state.AllowedNameSeen +
-                    " playerLike=" + state.AnyPlayerLikeTextSeen);
+                    " playerLike=" + state.AnyPlayerLikeTextSeen +
+                    " followBlocked=" + IsFollowBlockedByInvite);
                 return false;
             }
 

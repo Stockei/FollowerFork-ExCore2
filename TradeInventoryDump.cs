@@ -24,6 +24,7 @@ namespace Follower
         private const float CapturedAcceptCenterClientX = 115f;
         private const float CapturedAcceptCenterClientY = 984.25f;
         private const int MinimumAcceptDelayAfterDumpMs = 1600;
+        private const int InventoryVisibilityRecheckDelayMs = 100;
         private const int AcceptMoveSettleMs = 120;
         private const int AcceptMouseDownMs = 85;
         private const float AcceptScreenBottomOffsetY = 52f;
@@ -80,6 +81,12 @@ namespace Follower
                 if (_state != DumpState.Idle)
                 {
                     _plugin.LogMessage("TradeDump: ignored duplicate dump command; sequence already running.", 3);
+                    return;
+                }
+
+                if (!IsInventoryPanelVisible())
+                {
+                    _plugin.LogMessage("TradeDump: ignored dump command; inventory panel is not open/visible.", 3);
                     return;
                 }
 
@@ -173,12 +180,18 @@ namespace Follower
                 return false;
             }
 
+            if (!IsInventoryPanelVisible())
+            {
+                Complete("inventory closed before trade window opened");
+                return false;
+            }
+
             if (!IsTradeWindowOpen())
                 return false;
 
             _plugin.ReleaseAllPluginInputsNow(force: true, reason: "TradeDump.TradeWindowOpen.ReleaseFollowInputs");
             _state = DumpState.PrepareInventorySnapshot;
-            _nextActionAt = now.AddMilliseconds(100);
+            _nextActionAt = now.AddMilliseconds(InventoryVisibilityRecheckDelayMs);
             _plugin.LogMessage("TradeDump: trade window detected; preparing inventory dump.", 3);
             return true;
         }
@@ -196,8 +209,8 @@ namespace Follower
 
             if (!IsInventoryPanelVisible())
             {
-                _nextActionAt = now.AddMilliseconds(100);
-                return true;
+                Complete("inventory closed before dump snapshot");
+                return false;
             }
 
             _items = GetInventoryItemsSnapshot();
