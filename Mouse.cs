@@ -38,15 +38,20 @@ namespace Follower
         private static bool IsPointReasonable(Vector2 pt)
         {
             if (!IsFinite(pt.X) || !IsFinite(pt.Y)) return false;
-            // very top-left and negative coordinates are suspicious
-            if (pt.X < 5 || pt.Y < 5) return false;
+            // The outermost edges of the virtual desktop (all monitors) are suspicious.
+            // Using only the primary screen would reject every click while the game runs on another monitor.
+            var left = 0;
+            var top = 0;
             try
             {
-                var screenW = GetSystemMetrics(0);
-                var screenH = GetSystemMetrics(1);
-                if (pt.X >= screenW - 5 || pt.Y >= screenH - 5) return false;
+                left = GetSystemMetrics(76);   // SM_XVIRTUALSCREEN
+                top = GetSystemMetrics(77);    // SM_YVIRTUALSCREEN
+                var width = GetSystemMetrics(78);  // SM_CXVIRTUALSCREEN
+                var height = GetSystemMetrics(79); // SM_CYVIRTUALSCREEN
+                if (width > 0 && height > 0 && (pt.X >= left + width - 5 || pt.Y >= top + height - 5)) return false;
             }
             catch { /* ignore */ }
+            if (pt.X < left + 5 || pt.Y < top + 5) return false;
             return true;
         }
         public static bool IsGuardLocked => MouseGuard.IsLocked;

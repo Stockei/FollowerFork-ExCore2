@@ -634,7 +634,7 @@ namespace Follower
             using var __profileScope = _plugin.ProfileScope("PartyTeleport.ClickCenter");
             try
             {
-                var c = new Vector2(rect.Center.X, rect.Center.Y);
+                var c = _plugin.ClientToScreen(new Vector2(rect.Center.X, rect.Center.Y));
                 _plugin.PrepareForPluginMouseAction("PartyTeleport.ClickCenter.Prepare");
                 Mouse.SetCursorPosAndLeftClick(c, 0);
                 _plugin.CompletePluginMouseAction("PartyTeleport.ClickCenter.Complete");

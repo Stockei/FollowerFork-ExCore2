@@ -1477,7 +1477,7 @@ internal sealed class FollowerPickUpManager
         var offset = Math.Max(0, _plugin.Settings.General.RandomClickOffset.Value);
         var xJitter = offset > 0 ? _random.Next(-offset, offset + 1) : 0;
         var yJitter = offset > 0 ? _random.Next(-Math.Max(1, offset / 2), Math.Max(1, offset / 2) + 1) : 0;
-        return new Vector2(center.X + xJitter, center.Y + yJitter);
+        return _plugin.ClientToScreen(new Vector2(center.X + xJitter, center.Y + yJitter));
     }
 
     private static RectangleF GetRect(object labelElement, RectangleF? customRect)

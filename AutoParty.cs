@@ -271,7 +271,7 @@ namespace Follower
                                 try
                                 {
                                     var r = ch.GetClientRect();
-                                    var c = new Vector2(r.Center.X, r.Center.Y);
+                                    var c = _plugin.ClientToScreen(new Vector2(r.Center.X, r.Center.Y));
                                     _plugin.PrepareForPluginMouseAction("AutoParty.JoinVisit.Click.Prepare");
                                     Mouse.SetCursorPosAndLeftClick(c, 0);
                                     _plugin.CompletePluginMouseAction("AutoParty.JoinVisit.Click.Complete");
@@ -513,7 +513,7 @@ namespace Follower
                 _plugin.PrepareForPluginMouseAction("AutoParty.ClickNode.Prepare");
                 try
                 {
-                    Mouse.SetCursorPosAndLeftClick(center, 0);
+                    Mouse.SetCursorPosAndLeftClick(_plugin.ClientToScreen(center), 0);
                 }
                 finally
                 {

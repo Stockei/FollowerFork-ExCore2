@@ -569,6 +569,10 @@ private Random random = new Random();
 
     internal Vector2 WorldToValidScreenPositionForAutomation(Vector3 worldPos) => WorldToValidScreenPosition(worldPos);
 
+    // UI element rects (GetClientRect) are relative to the game window, but SetCursorPos needs screen coordinates.
+    // Without the window offset, clicks only land correctly when the window sits at the desktop origin (fullscreen on the main monitor).
+    internal Vector2 ClientToScreen(Vector2 clientPos) => clientPos + GameController.Window.GetWindowRectangleTimeCache.TopLeft;
+
     internal void DrawAutomationFrame(RectangleF rect, System.Drawing.Color color, int thickness) => Graphics.DrawFrame(rect, color, thickness);
 
     internal void SetFollowEnabledFromPartyChat(bool enabled, string leaderName, string commandText)
@@ -875,9 +879,9 @@ private Random random = new Random();
         if (uiLoot != null)
         {
             var clickPos = uiLoot.Label.GetClientRect().Center;
-            Mouse.SetCursorPos(new Vector2(
+            Mouse.SetCursorPos(ClientToScreen(new Vector2(
                 clickPos.X + random.Next(-15, 15),
-                clickPos.Y + random.Next(-10, 10)));
+                clickPos.Y + random.Next(-10, 10))));
             _nextBotAction = DateTime.Now.AddMilliseconds(30 + random.Next(SafeBotInputFrequencyMs()));
         }
     }
@@ -2035,7 +2039,7 @@ if (false && CheckDashTerrain(currentTask.WorldPosition))
             return new ArenaTransitionTarget
             {
                 LabelElement = labelElement,
-                LabelCenter = center,
+                LabelCenter = ClientToScreen(center),
                 WorldPosition = PositionOf(itemOnGround),
                 EntityId = IdOf(itemOnGround),
                 Text = text,
@@ -2456,7 +2460,7 @@ if (false && CheckDashTerrain(currentTask.WorldPosition))
             return new PortalTarget
             {
                 LabelElement = labelElement,
-                ClickPosition = center,
+                ClickPosition = ClientToScreen(center),
                 WorldPosition = PositionOf(itemOnGround),
                 EntityId = StableEntityId(IdOf(itemOnGround), path, center),
                 MetadataPath = path,
