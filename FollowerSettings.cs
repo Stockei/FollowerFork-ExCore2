@@ -710,13 +710,16 @@ public class DebugSettings
     [Menu("Debug TradeDump Accept click to txt")]
     public ToggleNode DebugTradeDumpAcceptToTxt { get; set; } = new ToggleNode(false);
 
+    [Menu("Debug party chat commands to txt", "Writes what the chat-command scanner reads to PartyChatCommandsDebug.txt. Lines of other players are masked.")]
+    public ToggleNode DebugPartyChatCommandsToTxt { get; set; } = new ToggleNode(false);
+
     [Menu("Debug AutoParty scanner to txt")]
     public ToggleNode DebugAutoPartyScannerToTxt { get; set; } = new ToggleNode(false);
 
     [Menu("Debug AutoParty reactions only to txt")]
     public ToggleNode DebugAutoPartyReactionsToTxt { get; set; } = new ToggleNode(false);
 
-    [Menu("AutoParty debug directory")]
+    [Menu("Debug txt directory (AutoParty, TradeDump, chat commands)")]
     public TextNode AutoPartyDebugDirectory { get; set; } = new TextNode(Path.Combine(Path.GetTempPath(), "FollowerDebug"));
 
     [Menu("AutoParty hover/window context dump to txt")]

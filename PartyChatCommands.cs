@@ -1,31 +1,37 @@
 using System;
 using System.Collections.Generic;
+using System.IO;
+using ExileCore2.PoEMemory;
 
 namespace Follower
 {
     internal sealed class PartyChatCommands
     {
-        private const int MaxNewChatLinesPerScan = 3;
-        private const int FallbackScanMs = 3000;
         private const int MinPollMs = 1000;
         private const int ArmDelayMs = 2500;
+        private const int TailLines = 30;
+        private const int MaxLineTextDepth = 3;
+        private const int DebugHeartbeatMs = 5000;
+        private const string DebugFileName = "PartyChatCommandsDebug.txt";
+
+        // In the current ExileCore2 build ChatPanel.ChatBox resolves to address 0, so the message list is also located through the
+        // UI tree: ChatPanel -> child 1 -> child 2 -> child 1, with one child element per chat line.
+        private static readonly int[] ChatLineListPath = { 1, 2, 1 };
 
         private readonly Follower _plugin;
         private DateTime _lastScan = DateTime.UtcNow.AddSeconds(-5);
-        private DateTime _lastFallbackScan = DateTime.UtcNow.AddSeconds(-5);
         private DateTime _armAt = DateTime.MinValue;
         private bool _initialized;
         private bool _armed;
         private bool _wasEnabled;
-        private long _lastSeenTotal = -1;
-        private string _lastSeenLatestKey = string.Empty;
+        private long _lastLineCount = -1;
+        private List<string> _lastTail = new List<string>();
+        private DateTime _nextDebugHeartbeatAt = DateTime.MinValue;
 
         public PartyChatCommands(Follower plugin)
         {
             _plugin = plugin;
         }
-
-        private dynamic UI => _plugin.GameController.IngameState?.IngameUi;
 
         public void Tick()
         {
@@ -50,9 +56,7 @@ namespace Follower
                     _wasEnabled = true;
                 }
 
-                // This feature runs from Render(), so it must only touch cheap counters during normal frames.
-                // It ignores the existing chat backlog while arming. This prevents a stale "-p" message from
-                // disabling follow immediately after plugin reload or after the chat UI finishes populating.
+                // This feature runs from Render(), so it only reads the newest chat lines once per poll interval.
                 var pollMs = Math.Max(MinPollMs, s.PartyChatLeaderCommands.PollMs.Value);
                 var now = DateTime.UtcNow;
                 if ((now - _lastScan).TotalMilliseconds < pollMs)
@@ -63,17 +67,22 @@ namespace Follower
                 if (string.IsNullOrWhiteSpace(leaderName))
                     return;
 
-                dynamic chatBox = null;
-                try { chatBox = UI?.ChatPanel?.ChatBox; } catch { chatBox = null; }
-                if (chatBox == null)
+                // During loading and right after a zone change the list can be missing. The last snapshot stays as it is,
+                // so lines written in the meantime are still processed once the list is readable again.
+                if (!TryReadNewestChatLines(out var lineCount, out var tail, out var source))
+                {
+                    WriteDebugHeartbeat(now, "chat line list not found");
                     return;
+                }
 
-                var currentTotal = TotalMessageCountOf(chatBox);
+                WriteDebugHeartbeat(now, $"source={source} lines={lineCount} armed={_armed}");
 
                 if (!_initialized)
                 {
-                    _lastSeenTotal = currentTotal;
-                    _lastSeenLatestKey = string.Empty;
+                    // Plugin start or reload: everything already in the chat is history and must not trigger a command.
+                    // Zone changes do not reset this state, so nothing written during a loading screen is skipped.
+                    _lastLineCount = lineCount;
+                    _lastTail = tail;
                     _armAt = now.AddMilliseconds(ArmDelayMs);
                     _initialized = true;
                     _armed = false;
@@ -82,58 +91,26 @@ namespace Follower
 
                 if (!_armed)
                 {
-                    // While arming, keep advancing the baseline but do not process any chat lines.
-                    // This absorbs already-visible history and late chat-buffer population.
-                    if (currentTotal >= 0)
-                        _lastSeenTotal = Math.Max(_lastSeenTotal, currentTotal);
-
+                    // Keep absorbing lines that are still being populated right after the reload.
+                    _lastLineCount = lineCount;
+                    _lastTail = tail;
                     if (now < _armAt)
                         return;
 
-                    _lastSeenTotal = currentTotal;
-                    _lastSeenLatestKey = string.Empty;
-                    if (currentTotal < 0)
-                    {
-                        var latestBaseline = ReadLatestChatEntry(chatBox, currentTotal);
-                        _lastSeenLatestKey = latestBaseline.Key;
-                    }
                     _armed = true;
+                    WriteDebug($"armed: watching party chat for commands from leader '{leaderName}'");
                     return;
                 }
 
-                if (currentTotal >= 0 && _lastSeenTotal >= 0)
+                var newLines = NewLinesSince(_lastLineCount, _lastTail, lineCount, tail);
+                _lastLineCount = lineCount;
+                _lastTail = tail;
+
+                foreach (var line in newLines)
                 {
-                    if (currentTotal < _lastSeenTotal)
-                    {
-                        // Chat buffer was reset/rebuilt. Re-arm and ignore the fresh backlog.
-                        _lastSeenTotal = currentTotal;
-                        _armAt = now.AddMilliseconds(ArmDelayMs);
-                        _armed = false;
-                        return;
-                    }
-
-                    if (currentTotal == _lastSeenTotal)
-                        return;
-
-                    var delta = currentTotal - _lastSeenTotal;
-                    var linesToRead = (int)Math.Min(delta, MaxNewChatLinesPerScan);
-                    ProcessLatestChatLines(chatBox, linesToRead, currentTotal, leaderName);
-                    _lastSeenTotal = currentTotal;
-                    return;
+                    if (!string.IsNullOrWhiteSpace(line))
+                        ProcessEntry(line, leaderName);
                 }
-
-                // Compatibility fallback for API builds where TotalMessageCount is unavailable.
-                // It remains intentionally slow and only reads one latest visible line after arming.
-                if ((now - _lastFallbackScan).TotalMilliseconds < FallbackScanMs)
-                    return;
-                _lastFallbackScan = now;
-
-                var latest = ReadLatestChatEntry(chatBox, currentTotal);
-                if (latest.Text.Length == 0 || string.Equals(latest.Key, _lastSeenLatestKey, StringComparison.Ordinal))
-                    return;
-
-                _lastSeenLatestKey = latest.Key;
-                ProcessEntry(latest.Text, leaderName);
             }
             catch (Exception ex)
             {
@@ -146,50 +123,154 @@ namespace Follower
             _initialized = false;
             _armed = false;
             _wasEnabled = false;
-            _lastSeenTotal = -1;
-            _lastSeenLatestKey = string.Empty;
+            _lastLineCount = -1;
+            _lastTail = new List<string>();
             _armAt = DateTime.MinValue;
             _lastScan = DateTime.UtcNow.AddSeconds(-5);
-            _lastFallbackScan = DateTime.UtcNow.AddSeconds(-5);
         }
 
-        private void ProcessLatestChatLines(dynamic chatBox, int linesToRead, long totalMessageCount, string leaderName)
+        /// <summary>
+        /// Reads the texts of the newest chat lines, oldest first. Lines without text stay in the list as empty
+        /// strings so positions keep matching the line count.
+        /// </summary>
+        private bool TryReadNewestChatLines(out long lineCount, out List<string> tail, out string source)
         {
-            if (linesToRead <= 0)
-                return;
+            lineCount = 0;
+            tail = new List<string>();
 
-            dynamic messageElements = null;
-            try { messageElements = chatBox.MessageElements; } catch { messageElements = null; }
+            var list = FindChatLineList(out source);
+            if (list == null)
+                return false;
 
-            var count = CountOf(messageElements);
-            if (count <= 0)
-                return;
+            lineCount = list.ChildCount;
 
-            // Read only the newest visible elements. Do not walk the whole chat history.
-            var start = Math.Max(0, count - Math.Min(linesToRead, MaxNewChatLinesPerScan));
-            for (var i = start; i < count; i++)
+            // Element.Children refuses very long lists, so the newest lines are fetched one by one.
+            for (var i = Math.Max(0, lineCount - TailLines); i < lineCount; i++)
             {
-                dynamic node = null;
-                try { node = messageElements[i]; } catch { node = null; }
-                if (node == null)
-                    continue;
+                Element line;
+                try { line = list.GetChildAtIndex((int)i); }
+                catch { line = null; }
 
-                var text = NormalizeText(TextOf(node));
-                if (string.IsNullOrWhiteSpace(text))
-                    continue;
-
-                var key = totalMessageCount.ToString() + ":" + IndexInParentOf(node, i).ToString() + ":" + text;
-                if (string.Equals(key, _lastSeenLatestKey, StringComparison.Ordinal))
-                    continue;
-
-                _lastSeenLatestKey = key;
-                ProcessEntry(text, leaderName);
+                tail.Add(NormalizeText(LineText(line, 0)));
             }
+
+            return true;
+        }
+
+        private Element FindChatLineList(out string source)
+        {
+            source = string.Empty;
+            try
+            {
+                var chatPanel = _plugin.GameController.IngameState?.IngameUi?.ChatPanel;
+                if (chatPanel == null)
+                    return null;
+
+                // Prefer the core's own chat box once it works again; today it points to address 0.
+                var chatBox = chatPanel.ChatBox;
+                if (chatBox != null && chatBox.Address != 0 && chatBox.ChildCount > 0)
+                {
+                    source = "ChatPanel.ChatBox";
+                    return chatBox;
+                }
+
+                var list = chatPanel.GetChildFromIndices(ChatLineListPath);
+                if (list != null && list.Address != 0 && list.ChildCount > 0)
+                {
+                    source = "ChatPanel[1][2][1]";
+                    return list;
+                }
+            }
+            catch
+            {
+            }
+
+            return null;
+        }
+
+        private static string LineText(Element element, int depth)
+        {
+            if (element == null)
+                return string.Empty;
+
+            try
+            {
+                var text = element.TextNoTags;
+                if (string.IsNullOrWhiteSpace(text))
+                    text = element.Text;
+                if (!string.IsNullOrWhiteSpace(text))
+                    return text;
+
+                // Some lines keep their text in child elements (channel, name, message); join them in order.
+                var childCount = element.ChildCount;
+                if (depth >= MaxLineTextDepth || childCount <= 0 || childCount > 16)
+                    return string.Empty;
+
+                var parts = new List<string>();
+                foreach (var child in element.Children)
+                {
+                    var part = LineText(child, depth + 1);
+                    if (!string.IsNullOrWhiteSpace(part))
+                        parts.Add(part);
+                }
+
+                return string.Concat(parts);
+            }
+            catch
+            {
+                return string.Empty;
+            }
+        }
+
+        /// <summary>
+        /// New lines since the last poll. The line count grows by one per message. If it did not grow (a full,
+        /// rotating chat history or a rebuilt list), the newest lines are aligned with the previous snapshot instead.
+        /// </summary>
+        private static List<string> NewLinesSince(long previousCount, List<string> previousTail, long currentCount, List<string> currentTail)
+        {
+            var result = new List<string>();
+            if (currentTail == null || currentTail.Count == 0)
+                return result;
+
+            if (previousCount >= 0 && currentCount > previousCount)
+            {
+                var added = (int)Math.Min(currentCount - previousCount, currentTail.Count);
+                result.AddRange(currentTail.GetRange(currentTail.Count - added, added));
+                return result;
+            }
+
+            if (previousTail == null || previousTail.Count == 0)
+                return result;
+
+            for (var overlap = Math.Min(previousTail.Count, currentTail.Count); overlap > 0; overlap--)
+            {
+                var matches = true;
+                for (var i = 0; i < overlap && matches; i++)
+                    matches = string.Equals(previousTail[previousTail.Count - overlap + i], currentTail[i], StringComparison.Ordinal);
+
+                if (!matches)
+                    continue;
+
+                for (var i = overlap; i < currentTail.Count; i++)
+                    result.Add(currentTail[i]);
+                return result;
+            }
+
+            // No overlap at all: process nothing rather than replaying old chat history.
+            return result;
         }
 
         private void ProcessEntry(string text, string leaderName)
         {
             var s = _plugin.Settings;
+
+            if (IsDebugEnabled())
+            {
+                var fromLeader = TryExtractPartyMessage(text, leaderName, out var debugMessage, out var debugSender, out var debugIsParty);
+                WriteDebug($"line={DescribeLineForDebug(text, leaderName)} party={debugIsParty} fromLeader={fromLeader}" +
+                           (fromLeader ? $" message='{debugMessage}'" : string.Empty) +
+                           (debugIsParty && !fromLeader ? $" sender='{debugSender}'" : string.Empty));
+            }
 
             if (TryParseLeaderPluginPauseCommand(
                     text,
@@ -252,27 +333,6 @@ namespace Follower
             {
                 _plugin.SetFollowEnabledFromPartyChat(followEnabled, leaderName, commandText);
             }
-        }
-
-        private ChatEntry ReadLatestChatEntry(dynamic chatBox, long totalMessageCount)
-        {
-            dynamic messageElements = null;
-            try { messageElements = chatBox.MessageElements; } catch { messageElements = null; }
-
-            var count = CountOf(messageElements);
-            if (count <= 0)
-                return ChatEntry.Empty;
-
-            dynamic node = null;
-            try { node = messageElements[count - 1]; } catch { node = null; }
-            if (node == null)
-                return ChatEntry.Empty;
-
-            var text = NormalizeText(TextOf(node));
-            if (string.IsNullOrWhiteSpace(text))
-                return ChatEntry.Empty;
-
-            return new ChatEntry(IndexInParentOf(node, count - 1), totalMessageCount, text);
         }
 
         private static bool TryParseLeaderPluginPauseCommand(
@@ -407,7 +467,19 @@ namespace Follower
             string leaderName,
             out string message)
         {
+            return TryExtractPartyMessage(rawText, leaderName, out message, out _, out _);
+        }
+
+        private static bool TryExtractPartyMessage(
+            string rawText,
+            string leaderName,
+            out string message,
+            out string sender,
+            out bool isParty)
+        {
             message = string.Empty;
+            sender = string.Empty;
+            isParty = false;
 
             if (string.IsNullOrWhiteSpace(rawText) || string.IsNullOrWhiteSpace(leaderName))
                 return false;
@@ -417,12 +489,14 @@ namespace Follower
                 return false;
 
             // Some chat layouts prepend timestamps before the channel marker. Keep the party marker and following text.
+            // A timestamp such as "[12:34]" contains colons itself, so a prefix without letters also counts as one.
             var percentIndex = text.IndexOf('%');
             var firstColon = text.IndexOf(':');
-            if (percentIndex > 0 && (firstColon < 0 || percentIndex < firstColon))
+            if (percentIndex > 0 && (firstColon < 0 || percentIndex < firstColon || !ContainsLetter(text.Substring(0, percentIndex))))
                 text = text.Substring(percentIndex).Trim();
+            else
+                text = SkipTimestampBefore(text, "[Party]");
 
-            var isParty = false;
             if (text.StartsWith("%", StringComparison.Ordinal))
             {
                 isParty = true;
@@ -443,46 +517,63 @@ namespace Follower
                 }
             }
 
-            // Leader commands are intentionally limited to party chat.
-            if (!isParty)
-                return false;
-
             var colon = text.IndexOf(':');
             if (colon <= 0)
                 return false;
 
-            var sender = text.Substring(0, colon).Trim();
+            sender = text.Substring(0, colon).Trim();
             message = text.Substring(colon + 1).Trim();
 
-            return string.Equals(sender, leaderName, StringComparison.OrdinalIgnoreCase) &&
+            // Leader commands are intentionally limited to party chat.
+            return isParty &&
+                   SenderIsLeader(sender, leaderName) &&
                    !string.IsNullOrWhiteSpace(message);
         }
 
-        private static string TextOf(dynamic node)
+        private static string SkipTimestampBefore(string text, string marker)
         {
-            try
+            var index = text.IndexOf(marker, StringComparison.OrdinalIgnoreCase);
+            if (index <= 0 || ContainsLetter(text.Substring(0, index)))
+                return text;
+
+            return text.Substring(index).Trim();
+        }
+
+        private static bool ContainsLetter(string text)
+        {
+            foreach (var ch in text)
             {
-                string textNoTags = null;
-                try { textNoTags = (string)node.TextNoTags; } catch { }
-                if (!string.IsNullOrWhiteSpace(textNoTags)) return textNoTags;
-                return (string)node.Text;
+                if (char.IsLetter(ch))
+                    return true;
             }
-            catch { return null; }
+
+            return false;
         }
 
-        private static int CountOf(dynamic collection)
+        /// <summary>
+        /// Accepts the plain character name and names with a guild tag in front, e.g. "&lt;TAG&gt; Name" or "[TAG]Name".
+        /// Character names never contain spaces, so the last word of the sender is the name.
+        /// </summary>
+        private static bool SenderIsLeader(string sender, string leaderName)
         {
-            try { return (int)collection.Count; } catch { return 0; }
-        }
+            sender = (sender ?? string.Empty).Trim();
+            leaderName = (leaderName ?? string.Empty).Trim();
+            if (sender.Length == 0 || leaderName.Length == 0)
+                return false;
 
-        private static int IndexInParentOf(dynamic node, int fallback)
-        {
-            try { return (int)node.IndexInParent; } catch { return fallback; }
-        }
+            if (string.Equals(sender, leaderName, StringComparison.OrdinalIgnoreCase))
+                return true;
 
-        private static long TotalMessageCountOf(dynamic chatBox)
-        {
-            try { return Convert.ToInt64(chatBox.TotalMessageCount); } catch { return -1; }
+            var name = sender;
+            var lastSpace = name.LastIndexOf(' ');
+            if (lastSpace >= 0)
+                name = name.Substring(lastSpace + 1);
+
+            var tagEnd = name.LastIndexOfAny(new[] { ']', '>', ')' });
+            if (tagEnd >= 0 && tagEnd < name.Length - 1)
+                name = name.Substring(tagEnd + 1);
+
+            return string.Equals(name, leaderName, StringComparison.OrdinalIgnoreCase);
         }
 
         private static string NormalizeText(string text)
@@ -521,22 +612,62 @@ namespace Follower
             return new string(chars.ToArray());
         }
 
-        private readonly struct ChatEntry
+        private bool IsDebugEnabled()
         {
-            public static ChatEntry Empty => new ChatEntry(-1, -1, string.Empty);
+            try { return _plugin.Settings.Debug.DebugPartyChatCommandsToTxt?.Value ?? false; }
+            catch { return false; }
+        }
 
-            public ChatEntry(int index, long totalMessageCount, string text)
+        /// <summary>
+        /// Full text only for lines that mention the leader or a command word; other players' messages are masked.
+        /// </summary>
+        private string DescribeLineForDebug(string text, string leaderName)
+        {
+            var relevant = text.IndexOf(leaderName, StringComparison.OrdinalIgnoreCase) >= 0;
+            try
             {
-                Index = index;
-                TotalMessageCount = totalMessageCount;
-                Text = text ?? string.Empty;
-                Key = totalMessageCount.ToString() + ":" + index.ToString() + ":" + Text;
+                var commands = _plugin.Settings.PartyChatLeaderCommands;
+                foreach (var command in new[] { commands.StopCommand.Value, commands.StartCommand.Value, commands.PausePluginCommand.Value, commands.ResumePluginCommand.Value })
+                {
+                    if (!string.IsNullOrWhiteSpace(command) && text.IndexOf(command.Trim(), StringComparison.OrdinalIgnoreCase) >= 0)
+                        relevant = true;
+                }
+            }
+            catch
+            {
             }
 
-            public int Index { get; }
-            public long TotalMessageCount { get; }
-            public string Text { get; }
-            public string Key { get; }
+            return relevant
+                ? $"'{text}'"
+                : $"<other: starts with '{(text.Length > 0 ? text.Substring(0, 1) : string.Empty)}', {text.Length} chars>";
+        }
+
+        private void WriteDebugHeartbeat(DateTime now, string state)
+        {
+            if (!IsDebugEnabled() || now < _nextDebugHeartbeatAt)
+                return;
+
+            _nextDebugHeartbeatAt = now.AddMilliseconds(DebugHeartbeatMs);
+            WriteDebug("state: " + state);
+        }
+
+        private void WriteDebug(string line)
+        {
+            try
+            {
+                if (!IsDebugEnabled())
+                    return;
+
+                var dir = _plugin.Settings.Debug.AutoPartyDebugDirectory?.Value;
+                if (string.IsNullOrWhiteSpace(dir))
+                    dir = Path.Combine(Path.GetTempPath(), "FollowerDebug");
+
+                Directory.CreateDirectory(dir);
+                File.AppendAllText(Path.Combine(dir, DebugFileName), $"{DateTime.Now:yyyy-MM-dd HH:mm:ss.fff} {line}{Environment.NewLine}");
+            }
+            catch
+            {
+            }
         }
     }
 }
