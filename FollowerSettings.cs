@@ -153,6 +153,27 @@ public class TransitionSettings
 
     [Menu("Transition retry cooldown (ms)")]
     public RangeNode<int> ArenaTransitionRetryCooldownMs { get; set; } = new RangeNode<int>(5000, 500, 30000);
+
+    [Menu("Follow leader through map exit portal", "In maps: if the leader disappears right at a portal that leads to a hideout, walk there and click it. The party teleport is then only the fallback. Off = old behaviour.")]
+    public ToggleNode FollowThroughMapExitPortal { get; set; } = new ToggleNode(true);
+
+    [Menu("Map exit: portal radius", "The leader must disappear within this distance (world units) of the portal.")]
+    public RangeNode<int> MapExitPortalRadius { get; set; } = new RangeNode<int>(150, 50, 400);
+
+    [Menu("Map exit: max leader distance", "Only react if the leader disappeared within this distance (world units) of the follower, so walking out of view does not count.")]
+    public RangeNode<int> MapExitMaxLeaderDistance { get; set; } = new RangeNode<int>(1200, 300, 3000);
+
+    [Menu("Map exit: wait after click (ms)", "Waits this long for the zone change before the portal is clicked again. At least 6000.")]
+    public RangeNode<int> MapExitRetryWaitMs { get; set; } = new RangeNode<int>(8000, 6000, 30000);
+
+    [Menu("Map exit: max portal clicks per zone")]
+    public RangeNode<int> MapExitMaxClicks { get; set; } = new RangeNode<int>(3, 1, 4);
+
+    [Menu("Map exit: party TP fallback after (ms)", "In maps the party teleport waits until the leader has been gone this long.")]
+    public RangeNode<int> MapExitTpFallbackMs { get; set; } = new RangeNode<int>(20000, 10000, 120000);
+
+    [Menu("Zone settle time (ms)", "After every zone change, the party teleport and the map exit portal wait this long. 0 = off.")]
+    public RangeNode<int> ZoneSettleMs { get; set; } = new RangeNode<int>(8000, 0, 30000);
 }
 
 [Submenu(CollapsedByDefault = true)]
@@ -713,13 +734,16 @@ public class DebugSettings
     [Menu("Debug party chat commands to txt", "Writes what the chat-command scanner reads to PartyChatCommandsDebug.txt. Lines of other players are masked.")]
     public ToggleNode DebugPartyChatCommandsToTxt { get; set; } = new ToggleNode(false);
 
+    [Menu("Debug map exit portal to txt", "Writes the map exit portal decisions (leader vanished, click, wait, fallback, settle) to MapExitPortalDebug.txt.")]
+    public ToggleNode DebugMapExitPortalToTxt { get; set; } = new ToggleNode(false);
+
     [Menu("Debug AutoParty scanner to txt")]
     public ToggleNode DebugAutoPartyScannerToTxt { get; set; } = new ToggleNode(false);
 
     [Menu("Debug AutoParty reactions only to txt")]
     public ToggleNode DebugAutoPartyReactionsToTxt { get; set; } = new ToggleNode(false);
 
-    [Menu("Debug txt directory (AutoParty, TradeDump, chat commands)")]
+    [Menu("Debug txt directory (AutoParty, TradeDump, chat commands, map exit)")]
     public TextNode AutoPartyDebugDirectory { get; set; } = new TextNode(Path.Combine(Path.GetTempPath(), "FollowerDebug"));
 
     [Menu("AutoParty hover/window context dump to txt")]

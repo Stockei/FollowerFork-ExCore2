@@ -14,7 +14,8 @@ namespace Follower
             Transition,
             ArenaTransition,
             Loot,
-            ClaimWaypoint
+            ClaimWaypoint,
+            MapExitPortal
         }
         /// <summary>
         /// The position of the task in world space.

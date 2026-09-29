@@ -17,7 +17,7 @@ using System.Threading;
 
 
 namespace Follower;
-public class Follower : BaseSettingsPlugin<FollowerSettings>
+public partial class Follower : BaseSettingsPlugin<FollowerSettings>
 {
     private const int SPRINT_HOLD_TO_START_MS = 1900;
     private const int SPRINT_RELEASE_STABLE_MS = 250;
@@ -304,6 +304,7 @@ private Random random = new Random();
     {
         using var __profileScope = ProfileScope("Follower.AreaChange.Total");
         ResetPathing();
+        OnMapExitAreaChange();
         _pickUpManager?.Reset("AreaChange");
 
         //Load initial transitions!
@@ -892,6 +893,7 @@ private Random random = new Random();
         try
         {
 ProcessPendingInputReleases();
+TickMapExitZoneState();
 //Dont run logic if we're dead!
 if (!GameController.Player.IsAlive)
 {
@@ -1009,7 +1011,8 @@ finally { _spikeProfiler?.End("Option.TeleportToLeader", __partyTeleportProfileS
 var __pickUpProfileStart = _spikeProfiler?.Begin("Option.PickUp") ?? 0L;
 try
 {
-    if (_pickUpManager?.Tick() == true)
+    // No pickup while the follower walks to or waits at the map exit portal.
+    if (!IsMapExitBusy && _pickUpManager?.Tick() == true)
     {
         SetRuntimeStatus("PickUp", _pickUpManager.Status, "");
         return;
@@ -1025,13 +1028,16 @@ finally { _spikeProfiler?.End("Option.PickUp", __pickUpProfileStart); }
         try { _followTarget = GetFollowingTarget(); }
         finally { ProfileEnd("Follower.Target.GetFollowingTarget", __leaderLookupProfileStart); }
 
+        // End-of-map portal: owns the follower while it follows the leader through a hideout portal.
+        var mapExitBusy = UpdateMapExitPortal();
+
         // Boss arena entrances can stay visible while the leader is still visible on the
         // same map. Scan/click the ground-label transition before normal follow planning
         // so following movement cannot override the Arena click.
-        var arenaTransitionQueued = TryQueueArenaTransitionTask();
-        var leaderCommandPortalQueued = !arenaTransitionQueued && TryProcessPendingLeaderPortalEntryRequest();
+        var arenaTransitionQueued = !mapExitBusy && TryQueueArenaTransitionTask();
+        var leaderCommandPortalQueued = !mapExitBusy && !arenaTransitionQueued && TryProcessPendingLeaderPortalEntryRequest();
 
-        if (!arenaTransitionQueued && !leaderCommandPortalQueued && _followTarget != null)
+        if (!mapExitBusy && !arenaTransitionQueued && !leaderCommandPortalQueued && _followTarget != null)
         {
             var distanceFromFollower = Vector3.Distance(GameController.Player.Pos, _followTarget.Pos);
             //We are NOT within clear path distance range of leader. Logic can continue
@@ -1372,6 +1378,10 @@ if (false && CheckDashTerrain(currentTask.WorldPosition))
                         }
                         break;
                     }
+
+                case TaskNode.TaskNodeType.MapExitPortal:
+                    ExecuteMapExitPortalTask(currentTask);
+                    break;
 
                 case TaskNode.TaskNodeType.ClaimWaypoint:
                     {
@@ -2339,7 +2349,7 @@ if (false && CheckDashTerrain(currentTask.WorldPosition))
         return entity == null ? null : ToPortalTarget(entity);
     }
 
-    private PortalTarget FindNearestVisibleHideoutPortalLabel()
+    private PortalTarget FindNearestVisibleHideoutPortalLabel(Func<PortalTarget, bool> filter = null)
     {
         using var __profileScope = ProfileScope("Follower.Portal.FindNearestVisibleHideoutPortalLabel");
 
@@ -2365,14 +2375,14 @@ if (false && CheckDashTerrain(currentTask.WorldPosition))
                 try { visibleLabels = labelsElement?.LabelOnGroundVisible; } catch { visibleLabels = null; }
             }
 
-            var target = FindPortalTargetInLabelCollection(visibleLabels, PortalLabelScanMaxVisibleLabels);
+            var target = FindPortalTargetInLabelCollection(visibleLabels, PortalLabelScanMaxVisibleLabels, filter);
             if (target != null)
                 return target;
 
             // Fallback only. Keep capped; the full ground-label collection can be large on maps.
             dynamic directLabels = null;
             try { directLabels = ingameUi.ItemsOnGroundLabels; } catch { directLabels = null; }
-            return FindPortalTargetInLabelCollection(directLabels, PortalLabelScanMaxVisibleLabels);
+            return FindPortalTargetInLabelCollection(directLabels, PortalLabelScanMaxVisibleLabels, filter);
         }
         catch
         {
@@ -2380,7 +2390,7 @@ if (false && CheckDashTerrain(currentTask.WorldPosition))
         }
     }
 
-    private PortalTarget FindPortalTargetInLabelCollection(dynamic labels, int maxLabelsToInspect)
+    private PortalTarget FindPortalTargetInLabelCollection(dynamic labels, int maxLabelsToInspect, Func<PortalTarget, bool> filter = null)
     {
         if (labels == null)
             return null;
@@ -2406,8 +2416,8 @@ if (false && CheckDashTerrain(currentTask.WorldPosition))
                 if (inspected > maxLabelsToInspect)
                     break;
 
-                var target = TryReadPortalTarget(groundLabel);
-                if (target == null)
+                PortalTarget target = TryReadPortalTarget(groundLabel);
+                if (target == null || (filter != null && !filter(target)))
                     continue;
 
                 var score = ScorePortalTarget(target, playerPos, anchor);
@@ -2579,7 +2589,7 @@ if (false && CheckDashTerrain(currentTask.WorldPosition))
         }
     }
 
-    private bool TryHoverThenClickPortal(PortalTarget portal, Vector2 screenPos)
+    private bool TryHoverThenClickPortal(PortalTarget portal, Vector2 screenPos, int hoverDelayMs = PortalHoverDelayMs)
     {
         using var __profileScope = ProfileScope("Follower.Portal.TryHoverThenClickPortal");
         if (portal == null) return false;
@@ -2606,7 +2616,7 @@ if (false && CheckDashTerrain(currentTask.WorldPosition))
             PrepareForPluginMouseAction("Follower.Portal.Hover.Prepare");
             if (!Mouse.IsGuardLocked) Mouse.SetCursorPosHuman2(clickPos);
             _portalHoverEntityId = entityId;
-            _portalHoverClickAt = now.AddMilliseconds(PortalHoverDelayMs);
+            _portalHoverClickAt = now.AddMilliseconds(hoverDelayMs);
             return true;
         }
 

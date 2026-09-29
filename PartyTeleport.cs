@@ -47,6 +47,21 @@ namespace Follower
             "Untainted Paradise","Vaal City","Vaal Village","Vaults of Kamasa","Wayward Isle","Wetlands","Willow","Woodland","Atziri's Temple","Abyssal Depths"
         };
 
+        internal static bool IsKnownMapName(string areaName)
+        {
+            if (string.IsNullOrWhiteSpace(areaName))
+                return false;
+
+            var name = areaName.Trim();
+            foreach (var mapName in PoE2MapNames)
+            {
+                if (string.Equals(mapName, name, StringComparison.OrdinalIgnoreCase))
+                    return true;
+            }
+
+            return false;
+        }
+
         public bool Tick()
         {
             using var __profileScope = _plugin.ProfileScope("PartyTeleport.Tick.Total");
@@ -106,6 +121,13 @@ namespace Follower
             if (!s.TpTrade.TeleportToLeader.Value)
             {
                 Status = "disabled by setting";
+                return false;
+            }
+
+            // Settle time after every zone change; in maps the party TP is only the fallback for the map exit portal.
+            if (_plugin.ShouldHoldPartyTeleport(out var holdReason))
+            {
+                Status = holdReason;
                 return false;
             }
 
